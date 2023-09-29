@@ -1,6 +1,7 @@
 library(ggplot2)
 library(dplyr)
-data2 <- read.table("/Users/tsapalou/Downloads/output_cov_mismatch_50250.tsv", header=T)
+library(argparse)
+#data2 <- read.table("/Users/tsapalou/Downloads/output_cov_mismatch_50250.tsv", header=T)
 
 plot_and_write_bedfile <- function(input_dataframe, output_filename) {
   
@@ -14,7 +15,7 @@ plot_and_write_bedfile <- function(input_dataframe, output_filename) {
     end = subset_data$window_start + 50
   )
   
-  # Write the BED dataframe to a file without row names and header
+  # Write the BED dataframe to a file 
   write.table(bed_data, file = output_filename, sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
   
   # First Plot using plot_dataframe_big
@@ -29,7 +30,7 @@ plot_and_write_bedfile <- function(input_dataframe, output_filename) {
   # Display the first plot
   print(plot1)
   
-# Second Plot using plot_dataframe_2
+  # Second Plot using plot_dataframe_2
   
   plot2 <- ggplot(input_dataframe, aes(x = window_start, y = matchrate, color = matchrate)) +
     geom_point(size = 0.6, color = "purple") +
@@ -38,7 +39,27 @@ plot_and_write_bedfile <- function(input_dataframe, output_filename) {
   
   # Display the second plot
   print(plot2)
+
+# Save the plots
+  ggsave(filename = "plot1.png", plot = plot1, width = 10, height = 6, units = "in")
+  ggsave(filename = "plot2.png", plot = plot2, width = 10, height = 6, units = "in")
+
 }
 
+
+
+# get the arguments from the command line
+parser <- ArgumentParser()
+parser$add_argument("input")
+parser$add_argument("output")
+args <- parser$parse_args()
+
+# Assuming it's a TSV based on your filename. If it's a CSV or another format, adjust accordingly.
+input_dataframe <- read.table(args$input, header = TRUE, stringsAsFactors = FALSE, sep = "\t")
+
+# Call the function using the read dataframe and provided output path
+plot_and_write_bedfile(input_dataframe, args$output)
+
+
 # Call the function
-plot_and_write_bedfile(data2, "/Users/tsapalou/Downloads/output.bed")
+#plot_and_write_bedfile(data2, "/Users/tsapalou/Downloads/output.bed")
