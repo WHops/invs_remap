@@ -23,16 +23,8 @@ plot_and_write_bedfile <- function(input_dataframe, output_filename) {
   # Write the BED dataframe to a file 
   write.table(bed_data, file = output_filename, sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
   
- # First Plot using plot_dataframe_big
-  plot1 <- ggplot(input_dataframe, aes(x = window_start)) +
-    geom_line(aes(y = reads_all, color = "reads_all"), linewidth = 0.4) +
-    geom_line(aes(y = matches, color = "matches"), linewidth = 0.4) +
-    scale_y_continuous(breaks = seq(0, 1500, by = 100)) +
-    geom_line(aes(y = matchrate * 1000, color = "matchrate"), linewidth = 0.2) +
-    labs(y = "Value", x = "Chromosome region (window start)", color = "Metric") +
-    theme_minimal()
-  
-# Second Plot using plot_dataframe_2
+
+# using plot_dataframe_2
   
   plot2 <- ggplot(input_dataframe, aes(x = window_start, y = matchrate, color = matchrate)) +
     geom_point(size = 0.6, color = "purple") +
@@ -41,7 +33,6 @@ plot_and_write_bedfile <- function(input_dataframe, output_filename) {
   
 
  # Save the plots
-  ggsave(filename = "plot1.png", plot = plot1, width = 10, height = 6, units = "in")
   ggsave(filename = "plot2.png", plot = plot2, width = 10, height = 6, units = "in")
   
 }

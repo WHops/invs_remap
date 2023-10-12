@@ -46,8 +46,6 @@ plot_and_write_bedfile <- function(input_dataframe, output_filename) {
 
 }
 
-
-
 # get the arguments from the command line
 parser <- ArgumentParser()
 parser$add_argument("input")
