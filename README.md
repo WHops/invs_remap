@@ -10,11 +10,11 @@ A repo collecting scripts and information for our read remapping procedure for b
 
 ## Second Step
 
-2) Select the regions that have a mismatchrate of ~20% and for which mismatches cover at least 10%
+2) Select the regions that have a high mismatch rate and for which mismatched bps cover at least 10% of the total mismatches.
 
 ## Third Step
 
-3) Remove the overlapping SD regions
+3) Remove the overlapping SD and centromeric regions
 
 ## Fourth Step
 
