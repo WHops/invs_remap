@@ -8,7 +8,7 @@ rule all:
         expand("filtered_{sample}.vcf", sample=SAMPLES)
 
 
-rule generate_tsv_with_mismatches_all:
+rule generate_tsv_with_matches_mismatches_columns:
     input:
         bam="{sample}.bam",
         ref="/g/impont/ref/hg38.fa"  
@@ -17,7 +17,6 @@ rule generate_tsv_with_mismatches_all:
     shell: 
         """
         # Add the bash script code here to generate the TSV file
-        # For example:
         pysamstats --pad --fasta {input.ref} --type variation --fields chrom,pos,reads_all,matches,deletions,mismatches {input.bam} -u | \
         awk 'BEGIN{{OFS="\t"; window=50; count=0; total_reads=0; total_matches=0; total_deletions=0; total_mismatches=0;}}
         !/^#/ {{
@@ -42,7 +41,7 @@ rule generate_tsv_with_mismatches_all:
         }}' > {output.tsv}
         """
     
-rule filter_tsv_to_bed:  
+rule tsv_to_bed_apply_mismatch_threshold:  
     input:
         tsv="{sample}_WITH_MISMATCHALL_COL.tsv"
     output:
@@ -51,7 +50,7 @@ rule filter_tsv_to_bed:
         """
         awk 'BEGIN {{FS=OFS="\t"}}
         NR==1 {{next}} # skip header
-        $7 < 0.8 && $7 != 0 && ($6 / $8) >= 0.10 {{
+        $7 < 0.8 && $7 != 0 && ($6 / $8) >= 0.15 {{
             print $1, $2, $2+50
         }}' {input.tsv} > {output.bed}
         """
@@ -125,7 +124,7 @@ rule bam_to_fasta:
     shell:
         "samtools view -b -L {input.bed} {input.bam} | samtools fasta - > {output.fasta}"
 
-rule ngmlr_mapping:
+rule NGMLR_mapping:
     input:
         fasta="{sample}.fasta",
         ref="/g/impont/ref/hg38.fa"
@@ -135,7 +134,7 @@ rule ngmlr_mapping:
     shell:
         "/g/korbel2/tsapalou/SURVIVOR-master/Debug/ngmlr-0.2.7/ngmlr -t {threads} -r {input.ref} -q {input.fasta} -o {output.sam} -x ont"
 
-rule correct_negative_quality_values:
+rule correct_negative_Q_values:
     input:
         sam="{sample}.sam"
     output:
@@ -159,7 +158,7 @@ rule index_bam:
     shell:
         "samtools index {input.bam}"
 
-rule delly_run:
+rule Delly:
     input:
         bam="sorted_{sample}.bam",
         ref="/g/impont/ref/hg38.fa"
@@ -168,7 +167,7 @@ rule delly_run:
     shell:
         "/g/korbel/shared/software/delly/bin/delly lr -g {input.ref} {input.bam} > {output.vcf}"
 
-rule filter_inversions:
+rule filter_only_inversions:
     input:
         vcf="{sample}.vcf"
     output:
