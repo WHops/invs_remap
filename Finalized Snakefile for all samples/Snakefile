@@ -1,0 +1,239 @@
+# Define your samples here
+###chatgpt: I want to extract all the names as part of the snakefile. snakemake will create the list and create the samples list and I don't need to do it outside the script manually
+SAMPLES = ['NA12878'] 
+
+import os
+import glob
+
+# Use glob to find your files
+cram_files = glob.glob("*.hg38.cram")
+
+# Extract the sample names from the file names
+samples = [os.path.basename(f).split('.')[0] for f in cram_files]
+
+rule all:
+    input:
+        expand("test/sorted_{sample}.bam.bai", sample=SAMPLES),
+        expand("test/intersected_{sample}.bed", sample=SAMPLES)
+
+
+rule generate_tsv_with_matches_mismatches_columns:
+    input:
+        bam="{sample}.bam",
+        ref="/g/impont/ref/hg38.fa"  
+    output:
+        tsv="test/{sample}_WITH_MISMATCHALL_COL.tsv"
+    conda:
+        "base.yaml"
+   resources:
+        runtime=1440, #24 hrs
+        cpus=64,
+        mem_mb=8000
+    shell: 
+        """
+        # Add the bash script code here to generate the TSV file
+        pysamstats --pad --fasta {input.ref} --type variation --fields chrom,pos,reads_all,matches,deletions,mismatches {input.bam} -u | \
+        awk 'BEGIN{{OFS="\t"; window=50; count=0; total_reads=0; total_matches=0; total_deletions=0; total_mismatches=0;}}
+        !/^#/ {{
+            count++;
+            total_reads+=$3;
+            total_matches+=$4;
+            total_deletions+=$5;
+            total_mismatches+=$6;
+            if(count==window){{
+                mismatches_all = total_reads - total_matches;
+                matchrate = (total_reads>0 ? total_matches/total_reads : 0);
+                print $1, $2-window+1, total_reads, total_matches, total_deletions, total_mismatches, matchrate, mismatches_all;
+                count=0; total_reads=0; total_matches=0; total_deletions=0; total_mismatches=0;
+            }}
+        }}
+        END{{
+            if(count>0){{
+                mismatches_all = total_reads - total_matches;
+                matchrate = (total_reads>0 ? total_matches/total_reads : 0);
+                print $1, $2-count+1, total_reads, total_matches, total_deletions, total_mismatches, matchrate, mismatches_all;
+            }}
+        }}' > {output.tsv}
+        """
+    
+rule tsv_to_bed_apply_mismatch_threshold:  
+    input:
+        tsv="test/{sample}_WITH_MISMATCHALL_COL.tsv"
+    output:
+        bed="test/{sample}.bed"
+    shell:
+        """
+        awk 'BEGIN {{FS=OFS="\t"}}
+        NR==1 {{next}} # skip header
+        $7 < 0.8 && $7 != 0 && ($6 / $8) >= 0.1 {{
+            print $1, $2, $2+50
+        }}' {input.tsv} > {output.bed}
+        """
+
+rule make_bed_tab_delimited:
+    input:
+        "test/{sample}.bed"
+    output:
+        "test/{sample}_tab.bed"
+    shell:
+        "awk '{{print $1\"\t\"$2\"\t\"$3}}' {input} > {output}"
+
+rule filter_out_invalid_bed_instances:
+    input:
+        "test/{sample}_tab.bed"
+    output:
+        "test/{sample}_tab_filtered.bed"
+    shell:
+        "awk '$2 >= 0' {input} > {output}"
+
+rule sort_bed:
+    input:
+        "test/{sample}_tab_filtered.bed"
+    output:
+        "test/{sample}_sorted.bed"
+    conda:
+        "base.yaml"
+    shell:
+        "bedtools sort -i {input} > {output}"
+
+rule merge_bed:
+    input:
+        "test/{sample}_sorted.bed"
+    output:
+        "test/{sample}_merged.bed"
+    conda:
+        "base.yaml"
+    shell:
+        "bedtools merge -i {input} -d 500 > {output}"
+
+rule subtract_duplications:
+    input:
+        bed="test/{sample}_merged.bed",
+        genomic_super_dup="data/GRCh38GenomicSuperDup.bed"
+    output:
+        "test/{sample}_no_duplications.bed"
+    conda:
+        "base.yaml"
+    shell:
+        "bedtools subtract -a {input.bed} -b {input.genomic_super_dup} > {output}"
+
+rule subtract_centromeres:
+    input:
+        bed="test/{sample}_no_duplications.bed",
+        centromeres="data/centromer_hg38_2.bed"
+    output:
+        "test/{sample}_no_duplications_no_centromeres.bed"
+    conda:
+        "base.yaml"
+    shell:
+        "bedtools subtract -a {input.bed} -b {input.centromeres} > {output}"
+
+rule filter_out_small_regions:
+    input:
+        bed="test/{sample}_no_duplications_no_centromeres.bed"
+    output:
+        "test/{sample}_no_50.bed"
+    shell:
+        "awk '(($3 - $2 > 50) && ($3 - $2 < 1000))' {input.bed} > {output}"
+    
+### Below this line are the steps for processing the BAM files and subsequent analyses
+
+rule bam_to_fasta:
+    input:
+        bam="{sample}.bam",
+        bed="test/{sample}_no_50.bed"
+    output:
+        fasta="test/{sample}.fasta"
+    conda:
+        "base.yaml"
+    shell:
+        "samtools view -b -L {input.bed} {input.bam} | samtools fasta - > {output.fasta}"
+
+rule NGMLR:
+    input:
+        fasta="test/{sample}.fasta",
+        ref="/g/impont/ref/hg38.fa"
+    output:
+        sam="test/{sample}.sam"
+    conda:
+        "base.yaml"
+    resources:
+        runtime=1440, #24 hrs
+        cpus=64,
+        mem_mb=128000
+    threads: 16
+    shell:
+        "/g/korbel2/tsapalou/SURVIVOR-master/Debug/ngmlr-0.2.7/ngmlr -t {threads} -r {input.ref} -q {input.fasta} -o {output.sam} -x ont"
+
+rule correct_sam_file:
+    input:
+        sam="test/{sample}.sam"
+    output:
+        corrected_sam="test/{sample}_corrected.sam"
+    shell:
+        """
+        grep -v '^@' {input.sam} | awk 'BEGIN {{OFS="\\t"}} {{if ($5 < 0) $5 = -$5}} 1' > temp_corrected.sam
+        grep '^@' {input.sam} > header.sam
+        cat header.sam temp_corrected.sam > {output.corrected_sam}
+        rm header.sam temp_corrected.sam
+        """
+
+rule sam_to_sorted_bam:
+    input:
+        corrected_sam="test/{sample}_corrected.sam"
+    output:
+        sorted_bam="test/sorted_{sample}.bam"
+     conda:
+        "base.yaml"
+    shell:
+        "samtools view -b {input.corrected_sam} | samtools sort -o {output.sorted_bam}"
+
+rule index_bam:
+    input:
+        bam="test/sorted_{sample}.bam"
+    output:
+        bai="test/sorted_{sample}.bam.bai"
+    conda:
+        "base.yaml"
+    shell:
+        "samtools index {input.bam}"
+
+rule run_Delly:
+    input:
+        bam="test/sorted_{sample}.bam",
+        bai="test/sorted_{sample}.bam.bai",  # Added the index as a dependency
+        ref="/g/impont/ref/hg38.fa"
+    output:
+        vcf="test/{sample}.vcf"
+    conda:
+        "base.yaml"
+    resources:
+        runtime=1440, #24 hrs
+        cpus=64,
+        mem_mb=128000
+    shell:
+        "/g/korbel/shared/software/delly/bin/delly lr -g {input.ref} {input.bam} > {output.vcf}"
+
+
+rule filter_only_inversions:
+    input:
+        vcf="test/{sample}.vcf"
+    output:
+        filtered_vcf="test/{sample}_filtered.vcf"
+    shell:
+        "~/mambaforge/envs/snakemake/bin/python3 /g/korbel2/tsapalou/sniffles/scripts/delly_inv_for_snakefile.py {input.vcf} {output.filtered_vcf}"
+
+rule filter_bad_overlap:
+    input:
+        filtered_vcf="test/{sample}_filtered.vcf",
+        bed="test/{sample}_no_50.bed"
+    output:
+        intersected_bed="test/intersected_{sample}.bed"
+    params:
+        overlap_fraction=0.1  # The fraction of overlap we want
+    conda:
+        "base.yaml"
+    shell:
+        """
+        bedtools intersect -a {input.bed} -b {input.filtered_vcf} -F {params.overlap_fraction} > {output.intersected_bed}
+        """
