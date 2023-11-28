@@ -1,0 +1,267 @@
+# Define your samples here
+###chatgpt: I want to extract all the names as part of the snakefile. snakemake will create the list and create the samples list and I don't need to do it outside the script manually
+#SAMPLES = ['NA12878'] 
+
+import os
+import glob
+
+os.environ["REF_CACHE"] = "/g/impont/ref/cram_cache/%2s/%2s/%s"
+
+envvars:
+    "REF_CACHE"
+
+cram_files = glob.glob("/g/impont/hg38/*.hg38.cram", recursive=True)
+
+samples = [os.path.basename(f).split('.')[0] for f in cram_files]
+samples= samples[:1]
+
+rule all:
+    input:
+        expand("outputs/ngmlr/NGMLR_sorted_{sample}.bam.bai", sample=samples),
+        expand("outputs/final/intersected_{sample}.bed", sample=samples)
+
+rule generate_intermediate_tsv:
+    input:
+        cram="/g/impont/hg38/{sample}.hg38.cram",
+        ref="/g/impont/ref/hg38.fa"
+    output:
+        tsv="outputs/intermediate_tsv/{sample}_intermediate.tsv"
+    params:
+        x=os.environ["REF_CACHE"]
+    resources:
+        runtime=3600, # 24 hrs in minutes
+        mem_mb=8000
+    shell:
+        """
+        export REF_CACHE=/g/impont/ref/cram_cache/%2s/%2s/%s
+        ~/mambaforge/bin/pysamstats --pad -c chr21 -f {input.ref} \
+        --type variation \
+        --fields chrom,pos,reads_all,matches,deletions,mismatches {input.cram} -u > {output.tsv}
+        """
+
+rule process_tsv_with_awk:
+    input:
+        tsv="outputs/intermediate_tsv/{sample}_intermediate.tsv"
+    output:
+        processed_tsv="outputs/tsv_mismatch/{sample}_WITH_MISMATCH_COL.tsv"
+    resources:
+        runtime=3600, # 24 hrs in minutes
+        mem_mb=8000
+    shell:
+        """
+        awk 'BEGIN{{OFS="\t"; window=50; count=0; total_reads=0; total_matches=0; total_deletions=0; total_mismatches=0;}}
+        !/^#/ {{
+            count++;
+            total_reads+=$3;
+            total_matches+=$4;
+            total_deletions+=$5;
+            total_mismatches+=$6;
+            if(count==window){{
+                mismatches_all = total_reads - total_matches;
+                matchrate = (total_reads>0 ? total_matches/total_reads : 0);
+                print $1, $2-window+1, total_reads, total_matches, total_deletions, total_mismatches, matchrate, mismatches_all;
+                count=0; total_reads=0; total_matches=0; total_deletions=0; total_mismatches=0;
+            }}
+        }}
+        END{{
+            if(count>0){{
+                mismatches_all = total_reads - total_matches;
+                matchrate = (total_reads>0 ? total_matches/total_reads : 0);
+                print $1, $2-count+1, total_reads, total_matches, total_deletions, total_mismatches, matchrate, mismatches_all;
+            }}
+        }}' {input.tsv} > {output.processed_tsv}
+        """
+
+  
+rule tsv_to_bed_apply_mismatch_threshold:  
+    input:
+        tsv="outputs/tsv_mismatch/{sample}_WITH_MISMATCH_COL.tsv"
+    output:
+        bed="outputs/tsv_mismatch/{sample}_processed.bed"
+    shell:
+        """
+        awk 'BEGIN {{FS=OFS="\t"}}
+        NR==1 {{next}} # skip header
+        $7 < 0.8 && $7 != 0 && ($6 / $8) >= 0.1 {{
+            print $1, $2, $2+50
+        }}' {input.tsv} > {output.bed}
+        """
+
+rule make_bed_tab_delimited:
+    input:
+        "outputs/tsv_mismatch/{sample}_processed.bed"
+    output:
+        "outputs/tsv_mismatch/{sample}_tab.bed"
+    shell:
+        """
+        awk '{{print $1\"\t\"$2\"\t\"$3}}' {input} > {output}
+        """
+
+rule filter_out_invalid_bed_instances:
+    input:
+        "outputs/tsv_mismatch/{sample}_tab.bed"
+    output:
+        "outputs/tsv_mismatch/{sample}_tab_filtered.bed"
+    shell:
+        """
+        awk '$2 >= 0' {input} > {output}
+        """
+
+rule sort_bed:
+    input:
+        "outputs/tsv_mismatch/{sample}_tab_filtered.bed"
+    output:
+        "outputs/tsv_mismatch/{sample}_sorted.bed"
+    conda:
+        "base.yaml"
+    shell:
+        "bedtools sort -i {input} > {output}"
+
+rule merge_bed:
+    input:
+        "outputs/tsv_mismatch/{sample}_sorted.bed"
+    output:
+        "outputs/tsv_mismatch/{sample}_merged.bed"
+    conda:
+        "base.yaml"
+    shell:
+        "bedtools merge -i {input} -d 500 > {output}"
+
+rule subtract_duplications:
+    input:
+        bed="outputs/tsv_mismatch/{sample}_merged.bed",
+        genomic_super_dup="data/GRCh38GenomicSuperDup.bed"
+    output:
+        "outputs/no_dups/{sample}_no_duplications.bed"
+    conda:
+        "base.yaml"
+    shell:
+        "bedtools subtract -a {input.bed} -b {input.genomic_super_dup} > {output}"
+
+rule subtract_centromeres:
+    input:
+        bed="outputs/no_dups/{sample}_no_duplications.bed",
+        centromeres="data/centromer_hg38_2.bed"
+    output:
+        "outputs/no_dups/{sample}_no_duplications_no_centromeres.bed"
+    conda:
+        "base.yaml"
+    shell:
+        "bedtools subtract -a {input.bed} -b {input.centromeres} > {output}"
+
+
+rule filter_out_small_regions:
+    input:
+        bed="outputs/no_dups/{sample}_no_duplications_no_centromeres.bed"
+    output:
+        "outputs/no_dups/{sample}_no_50.bed"
+    shell:
+        """
+        awk '(($3 - $2 > 50) && ($3 - $2 < 1000))' {input.bed} > {output}
+        """
+    
+### Below this line are the steps for processing the BAM files and subsequent analyses
+
+rule bam_to_fasta:
+    input:
+        cram="/g/impont/hg38/{sample}.hg38.cram",
+        bed="outputs/no_dups/{sample}_no_50.bed",
+        ref="/g/impont/ref/hg38.fa"  
+    output:
+        fasta="outputs/bam_to_fasta/{sample}.fasta"
+    conda:
+        "base.yaml"
+    resources:
+        runtime=3000, 
+        mem_mb=8000
+    shell:
+        """
+        samtools view -b -T {input.ref} -L {input.bed} {input.cram} | samtools fasta - > {output.fasta}
+        """
+
+rule NGMLR:
+    input:
+        fasta="outputs/bam_to_fasta/{sample}.fasta",
+        ref="/g/impont/ref/hg38.fa"
+    output:
+        sam="outputs/ngmlr/{sample}_NGMLR.sam"
+    conda:
+        "base.yaml"
+    resources:
+        runtime=3600, #24 hrs
+        mem_mb=128000
+    threads: 64
+    shell:
+        "ngmlr -t {threads} -r {input.ref} -q {input.fasta} -o {output.sam} -x ont"
+
+rule correct_sam_file:
+    input:
+        sam="outputs/ngmlr/{sample}_NGMLR.sam"
+    output:
+        corrected_sam="outputs/ngmlr/{sample}_NGMLR_corrected.sam"
+    shell:
+        """
+        grep -v '^@' {input.sam} | awk 'BEGIN {{OFS="\\t"}} {{if ($5 < 0) $5 = -$5}} 1' > temp_corrected.sam
+        grep '^@' {input.sam} > header.sam
+        cat header.sam temp_corrected.sam > {output.corrected_sam}
+        rm header.sam temp_corrected.sam
+        """
+
+rule sam_to_sorted_bam:
+    input:
+        corrected_sam="outputs/ngmlr/{sample}_NGMLR_corrected.sam"
+    output:
+        sorted_bam="outputs/ngmlr/NGMLR_sorted_{sample}.bam"
+    conda:
+        "base.yaml"
+    shell:
+        "samtools view -b {input.corrected_sam} | samtools sort -o {output.sorted_bam}"
+
+rule index_bam:
+    input:
+        bam="outputs/ngmlr/NGMLR_sorted_{sample}.bam"
+    output:
+        bai="outputs/ngmlr/NGMLR_sorted_{sample}.bam.bai"
+    conda:
+        "base.yaml"
+    shell:
+        "samtools index {input.bam}"
+
+rule run_Delly:
+    input:
+        bam="outputs/ngmlr/NGMLR_sorted_{sample}.bam",
+        bai="outputs/ngmlr/NGMLR_sorted_{sample}.bam.bai",  # Added the index as a dependency
+        ref="/g/impont/ref/hg38.fa"
+    output:
+        vcf="outputs/delly/{sample}.vcf"
+    conda:
+        "base.yaml"
+    resources:
+        runtime=3600, 
+        mem_mb=128000
+    shell:
+        "delly lr -g {input.ref} {input.bam} > {output.vcf}"
+
+
+rule filter_only_inversions:
+    input:
+        vcf="outputs/delly/{sample}.vcf"
+    output:
+        filtered_vcf="outputs/delly_inv/{sample}_filtered.vcf"
+    shell:
+        "~/mambaforge/envs/snakemake/bin/python3 /g/korbel2/tsapalou/sniffles/scripts/delly_inv_for_snakefile.py {input.vcf} {output.filtered_vcf}"
+
+rule filter_bad_overlap:
+    input:
+        filtered_vcf="outputs/delly_inv/{sample}_filtered.vcf",
+        bed="outputs/no_dups/{sample}_no_50.bed"
+    output:
+        intersected_bed="outputs/final/intersected_{sample}.bed"
+    params:
+        overlap_fraction=0.1  # The fraction of overlap we want
+    conda:
+        "base.yaml"
+    shell:
+        """
+        bedtools intersect -a {input.bed} -b {input.filtered_vcf} -F {params.overlap_fraction} > {output.intersected_bed}
+        """
